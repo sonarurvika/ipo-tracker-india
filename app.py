@@ -186,7 +186,9 @@ st.set_page_config(page_title="🇮🇳 NSE IPO Tracker", layout="wide")
 st.title("🇮🇳 NSE IPO Tracker")
 st.caption("Live data from NSE IPO APIs for learning/demo only. Not investment advice.")
 
-tab_current, tab_upcoming = st.tabs(["📈 Current Issues", "🕒 Upcoming Issues"])
+tab_current, tab_upcoming, tab_past = st.tabs(
+    ["📈 Current Issues", "🕒 Upcoming Issues", "📜 Past IPOs (Last Quarter)"]
+)
 
 
 # ---- Current IPOs ----
