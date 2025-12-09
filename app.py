@@ -6,6 +6,7 @@ import streamlit as st
 SOURCE_URL = "https://www.chittorgarh.com/report/upcoming-ipo-in-india/80/"
 
 @st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)
 def fetch_ipos():
     """
     Scrape upcoming IPOs from Chittorgarh and return as a DataFrame.
@@ -13,16 +14,39 @@ def fetch_ipos():
     """
     headers = {"User-Agent": "Mozilla/5.0"}
     resp = requests.get(SOURCE_URL, headers=headers, timeout=15)
-    resp.raise_for_status()
+
+    # If the site blocks us or errors out:
+    if resp.status_code != 200:
+        st.warning(f"Source returned status code: {resp.status_code}")
+        return pd.DataFrame()
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # Grab the first striped table on the page
-    table = soup.find("table")
-    if not table:
+    # Get ALL tables instead of just the first
+    tables = soup.find_all("table")
+    if not tables:
+        st.warning("No tables found on source page.")
         return pd.DataFrame()
 
-    rows = table.find("tbody").find_all("tr")
+    # Heuristic: pick the table whose header contains 'Company' or 'IPO'
+    target_table = None
+    for t in tables:
+        header_row = t.find("tr")
+        if not header_row:
+            continue
+        header_cells = header_row.find_all(["th", "td"])
+        header_text = " ".join(c.get_text(strip=True).lower() for c in header_cells)
+        if ("company" in header_text or "ipo" in header_text) and ("open" in header_text or "close" in header_text):
+            target_table = t
+            break
+
+    # Fallback: first table
+    if target_table is None:
+        target_table = tables[0]
+
+    # Try to get rows either from <tbody> or directly
+    body = target_table.find("tbody")
+    rows = body.find_all("tr") if body else target_table.find_all("tr")[1:]  # skip header row
 
     data = []
     for r in rows:
@@ -30,9 +54,9 @@ def fetch_ipos():
         if not cols:
             continue
 
-        # This mapping may need tweaking if the site layout changes
+        # Be defensive about number of columns
         ipo = {
-            "Company": cols[0],
+            "Company": cols[0] if len(cols) > 0 else "",
             "Open Date": cols[1] if len(cols) > 1 else "",
             "Close Date": cols[2] if len(cols) > 2 else "",
             "Price Band": cols[3] if len(cols) > 3 else "",
@@ -43,7 +67,12 @@ def fetch_ipos():
         }
         data.append(ipo)
 
+    if not data:
+        st.warning("Parsed table but found no IPO rows. The page structure may have changed.")
+        return pd.DataFrame()
+
     return pd.DataFrame(data)
+
 
 
 st.set_page_config(page_title="India IPO Tracker", layout="wide")
