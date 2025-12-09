@@ -267,6 +267,56 @@ with tab_upcoming:
     except Exception as e:
         st.error(f"Error loading upcoming IPOs: {e}")
 
+# ---- Past IPOs (Last Quarter) ----
+with tab_past:
+    from_date, to_date = get_last_completed_quarter_range()
+    st.subheader("Past IPOs – Last Completed Quarter (NSE)")
+    st.caption(f"Showing IPOs with issue dates between {from_date} and {to_date}.")
+
+    try:
+        df_past = fetch_past_ipos_last_quarter()
+        if df_past.empty:
+            st.warning(
+                "No past IPO data returned from NSE for the last quarter. "
+                "The API parameters may have changed or there were no IPOs in that period."
+            )
+        else:
+            col1, col2 = st.columns([1, 2])
+
+            with col1:
+                search_p = st.text_input(
+                    "Search by company or symbol", key="search_past"
+                )
+
+            with col2:
+                # If Issue Type exists (e.g., Book Built, Fixed Price)
+                if "Issue Type" in df_past.columns:
+                    issue_types = sorted(df_past["Issue Type"].dropna().unique())
+                    issue_type_filter = st.multiselect(
+                        "Issue Type",
+                        options=issue_types,
+                        default=issue_types,
+                    )
+                else:
+                    issue_type_filter = []
+
+            df_view_p = df_past.copy()
+
+            if issue_type_filter:
+                df_view_p = df_view_p[df_view_p["Issue Type"].isin(issue_type_filter)]
+
+            if search_p:
+                mask_p = (
+                    df_view_p["Company"].str.contains(search_p, case=False, na=False)
+                    | df_view_p["Symbol"].str.contains(search_p, case=False, na=False)
+                )
+                df_view_p = df_view_p[mask_p]
+
+            st.dataframe(df_view_p, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Error loading past IPOs: {e}")
+
 
 st.markdown(
     """
