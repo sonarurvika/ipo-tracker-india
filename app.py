@@ -89,7 +89,15 @@ def parse_listing_date_screener(val: str) -> dt.date | None:
 
 
 def drop_sr_no_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove Sr No / unnamed index style columns."""
+    """Remove Sr No / unnamed index style columns, works for normal & MultiIndex columns."""
+    # If columns are MultiIndex, flatten first
+    if isinstance(df.columns, pd.MultiIndex):
+        flat_cols = []
+        for tup in df.columns:
+            parts = [str(x).strip() for x in tup if x is not None and str(x) != "nan"]
+            flat_cols.append(" ".join(parts).strip())
+        df.columns = flat_cols
+
     to_drop = []
     for c in df.columns:
         name = str(c).strip().lower()
@@ -100,6 +108,7 @@ def drop_sr_no_columns(df: pd.DataFrame) -> pd.DataFrame:
     if to_drop:
         df = df.drop(columns=to_drop)
     return df
+
 
 
 # ---------- DRHP link helper ----------
@@ -121,15 +130,22 @@ def get_sebi_drhp_url(company_name: str) -> str:
 # ---------- Data fetching from Screener ----------
 
 @st.cache_data(ttl=600)
+
 def fetch_upcoming_raw() -> pd.DataFrame:
     """
     Fetch raw upcoming IPO table from Screener.in.
+    Handles both normal and MultiIndex (multi-row header) tables.
     """
-    tables = pd.read_html(UPCOMING_URL)
+    tables = pd.read_html(UPCOMING_URL, header=0)
     target = None
+
     for df in tables:
         df = drop_sr_no_columns(df)
-        cols = [str(c).strip() for c in df.columns.astype(str)]
+
+        # After flattening in drop_sr_no_columns, columns should be simple Index
+        cols = [str(c).strip() for c in df.columns]
+
+        # Debug pattern: look for key columns
         if "Name" in cols and "Subscription Period" in cols and "Listing Date" in cols:
             df.columns = cols
             target = df
@@ -141,16 +157,21 @@ def fetch_upcoming_raw() -> pd.DataFrame:
     return target
 
 
+
 @st.cache_data(ttl=600)
 def fetch_recent_raw() -> pd.DataFrame:
     """
     Fetch raw recent IPO table from Screener.in.
+    Handles both normal and MultiIndex (multi-row header) tables.
     """
-    tables = pd.read_html(RECENT_URL)
+    tables = pd.read_html(RECENT_URL, header=0)
     target = None
+
     for df in tables:
         df = drop_sr_no_columns(df)
-        cols = [str(c).strip() for c in df.columns.astype(str)]
+
+        cols = [str(c).strip() for c in df.columns]
+
         if (
             "Name" in cols
             and "Listing Date" in cols
@@ -164,6 +185,7 @@ def fetch_recent_raw() -> pd.DataFrame:
         return pd.DataFrame()
 
     return target
+
 
 
 @st.cache_data(ttl=600)
