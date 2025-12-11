@@ -2,16 +2,31 @@ import datetime as dt
 import urllib.parse
 
 import pandas as pd
+import requests
 import streamlit as st
+from bs4 import BeautifulSoup
+
+# -----------------------------
+# Config: data sources
+# -----------------------------
 
 UPCOMING_URL = "https://www.screener.in/ipo/"
 RECENT_URL = "https://www.screener.in/ipo/recent/"
 
+SEBI_LISTING_URL = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do"
 
-# ---------- Date helpers ----------
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+# -----------------------------
+# Generic helpers
+# -----------------------------
+
 
 def get_3_months_ago() -> dt.date:
-    """Return date 3 months ago (approx 90 days back)."""
+    """Return date ~3 months ago (approx 90 days)."""
     return dt.date.today() - dt.timedelta(days=90)
 
 
@@ -88,16 +103,21 @@ def parse_listing_date_screener(val: str) -> dt.date | None:
     return None
 
 
-def drop_sr_no_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove Sr No / unnamed index style columns, works for normal & MultiIndex columns."""
-    # If columns are MultiIndex, flatten first
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten MultiIndex columns and drop Sr No / unnamed columns."""
+    # Flatten multi-row headers if needed
     if isinstance(df.columns, pd.MultiIndex):
         flat_cols = []
         for tup in df.columns:
-            parts = [str(x).strip() for x in tup if x is not None and str(x) != "nan"]
+            parts = [
+                str(x).strip()
+                for x in tup
+                if x is not None and str(x).strip().lower() != "nan"
+            ]
             flat_cols.append(" ".join(parts).strip())
         df.columns = flat_cols
 
+    # Drop Sr No / unnamed columns
     to_drop = []
     for c in df.columns:
         name = str(c).strip().lower()
@@ -107,45 +127,24 @@ def drop_sr_no_columns(df: pd.DataFrame) -> pd.DataFrame:
             to_drop.append(c)
     if to_drop:
         df = df.drop(columns=to_drop)
+
     return df
 
 
+# -----------------------------
+# Screener: Upcoming & Recent IPO tables
+# -----------------------------
 
-# ---------- DRHP link helper ----------
-
-def get_sebi_drhp_url(company_name: str) -> str:
-    """
-    Build a SEBI offer document search URL for this company.
-    This will show DRHP/RHP/offer docs for the name where available.
-    """
-    base = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do"
-    params = {
-        "doListing": "yes",
-        "searchString": company_name,
-        "categoryId": "17",  # Public issue offer documents
-    }
-    return f"{base}?{urllib.parse.urlencode(params)}"
-
-
-# ---------- Data fetching from Screener ----------
 
 @st.cache_data(ttl=600)
-
 def fetch_upcoming_raw() -> pd.DataFrame:
-    """
-    Fetch raw upcoming IPO table from Screener.in.
-    Handles both normal and MultiIndex (multi-row header) tables.
-    """
-    tables = pd.read_html(UPCOMING_URL, header=0)
+    """Fetch raw upcoming IPO table from Screener.in."""
+    tables = pd.read_html(UPCOMING_URL)
     target = None
 
     for df in tables:
-        df = drop_sr_no_columns(df)
-
-        # After flattening in drop_sr_no_columns, columns should be simple Index
+        df = normalize_columns(df)
         cols = [str(c).strip() for c in df.columns]
-
-        # Debug pattern: look for key columns
         if "Name" in cols and "Subscription Period" in cols and "Listing Date" in cols:
             df.columns = cols
             target = df
@@ -157,21 +156,15 @@ def fetch_upcoming_raw() -> pd.DataFrame:
     return target
 
 
-
 @st.cache_data(ttl=600)
 def fetch_recent_raw() -> pd.DataFrame:
-    """
-    Fetch raw recent IPO table from Screener.in.
-    Handles both normal and MultiIndex (multi-row header) tables.
-    """
-    tables = pd.read_html(RECENT_URL, header=0)
+    """Fetch raw recent IPO table from Screener.in."""
+    tables = pd.read_html(RECENT_URL)
     target = None
 
     for df in tables:
-        df = drop_sr_no_columns(df)
-
+        df = normalize_columns(df)
         cols = [str(c).strip() for c in df.columns]
-
         if (
             "Name" in cols
             and "Listing Date" in cols
@@ -187,7 +180,6 @@ def fetch_recent_raw() -> pd.DataFrame:
     return target
 
 
-
 @st.cache_data(ttl=600)
 def fetch_upcoming_processed() -> pd.DataFrame:
     """
@@ -199,14 +191,13 @@ def fetch_upcoming_processed() -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Identify the M.Cap column (could be 'M.Cap Cr' or similar)
+    # Identify the M.Cap column
     mcap_col = None
     for c in df.columns:
         if "m.cap" in str(c).lower():
             mcap_col = c
             break
 
-    # Keep only required visible columns
     keep_cols = ["Name", "Subscription Period", "Listing Date"]
     if mcap_col:
         keep_cols.append(mcap_col)
@@ -216,7 +207,7 @@ def fetch_upcoming_processed() -> pd.DataFrame:
         df = df.rename(columns={mcap_col: "M.Cap Cr"})
 
     # Filter out SME / non-EQ IPOs where marked in name
-    df = df[~df["Name"].str.contains("SME", case=False, na=False)].reset_index(drop=True)
+    df = df[~df["Name"].str.contains("sme", case=False, na=False)].reset_index(drop=True)
 
     # Add placeholder Price band
     df["Price band"] = ""
@@ -259,7 +250,6 @@ def fetch_recent_processed() -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Normalise column names we care about
     rename_map = {}
     for c in df.columns:
         sc = str(c).strip()
@@ -285,7 +275,6 @@ def fetch_recent_processed() -> pd.DataFrame:
     keep_cols = [c for c in keep_cols if c in df.columns]
     df = df[keep_cols].copy()
 
-    # Parse listing date
     df["_listing_date"] = df["Listing Date"].apply(parse_listing_date_screener)
 
     return df
@@ -309,26 +298,153 @@ def fetch_past_last_3_months() -> pd.DataFrame:
     return df
 
 
-# ---------- AI/DRHP analysis layout ----------
+# -----------------------------
+# SEBI smart search: RHP first, then DRHP
+# -----------------------------
+
+
+def _sebi_list_page(params: dict) -> BeautifulSoup | None:
+    """Call SEBI filings listing with given params and return BeautifulSoup tree."""
+    try:
+        r = requests.get(
+            SEBI_LISTING_URL, params=params, headers=HTTP_HEADERS, timeout=15
+        )
+        r.raise_for_status()
+        return BeautifulSoup(r.text, "lxml")
+    except Exception:
+        return None
+
+
+def _pick_doc_from_listing(soup: BeautifulSoup, company_name: str) -> str | None:
+    """
+    From a SEBI listing page, pick the best matching URL for the company.
+    Prefer RHP, then DRHP/draft, then anything else.
+    """
+    if soup is None:
+        return None
+
+    company_lc = company_name.lower()
+    first_word = company_lc.split()[0] if company_lc else ""
+
+    best_rhp = None
+    best_drhp = None
+    best_other = None
+
+    for a in soup.select("table a"):
+        title = (a.get_text(strip=True) or "").lower()
+        href = a.get("href") or ""
+        if not href:
+            continue
+
+        # Only filings/public-issues
+        if "/filings/public-issues/" not in href:
+            continue
+
+        if first_word and first_word not in title:
+            continue
+
+        if href.startswith("/"):
+            url = "https://www.sebi.gov.in" + href
+        else:
+            url = href
+
+        if "rhp" in title:
+            if best_rhp is None:
+                best_rhp = url
+        elif "drhp" in title or "draft" in title:
+            if best_drhp is None:
+                best_drhp = url
+        else:
+            if best_other is None:
+                best_other = url
+
+    return best_rhp or best_drhp or best_other
+
+
+@st.cache_data(ttl=3600)
+def get_best_sebi_ipo_doc(company_name: str) -> str | None:
+    """
+    Try to find the best SEBI public-issues filing for this company.
+    1) Look in 'Red Herring Documents filed with ROC' (RHP)
+    2) If not found, look in 'Draft Offer Documents filed with SEBI' (DRHP)
+    3) Fallback to generic Public Issues listing.
+    Returns a full https://www.sebi.gov.in/filings/public-issues/... URL or None.
+    """
+    # 1) RHP listing (smid=11)
+    params_rhp = {
+        "doListing": "yes",
+        "sid": "3",   # Filings
+        "smid": "11", # Red Herring Documents filed with ROC
+        "ssid": "15",
+        "search": company_name,
+    }
+    soup_rhp = _sebi_list_page(params_rhp)
+    url = _pick_doc_from_listing(soup_rhp, company_name)
+    if url:
+        return url
+
+    # 2) DRHP listing (smid=10)
+    params_drhp = {
+        "doListing": "yes",
+        "sid": "3",
+        "smid": "10",  # Draft Offer Documents filed with SEBI
+        "ssid": "15",
+        "search": company_name,
+    }
+    soup_drhp = _sebi_list_page(params_drhp)
+    url = _pick_doc_from_listing(soup_drhp, company_name)
+    if url:
+        return url
+
+    # 3) Fallback: generic Public Issues filings
+    params_all = {
+        "doListing": "yes",
+        "sid": "3",
+        "smid": "0",
+        "ssid": "15",
+        "search": company_name,
+    }
+    soup_all = _sebi_list_page(params_all)
+    url = _pick_doc_from_listing(soup_all, company_name)
+    return url
+
+
+# -----------------------------
+# DRHP-focused analysis panel
+# -----------------------------
+
 
 def render_ai_analysis(company_name: str):
-    """Render the AI / DRHP-focused analysis skeleton for a selected company."""
+    """Render the DRHP/RHP-focused analysis skeleton for a selected company."""
     st.markdown("---")
-    st.markdown(f"### 🔍 AI / DRHP Analysis — **{company_name}**")
+    st.markdown(f"### 🔍 DRHP / RHP-Focused Analysis — **{company_name}**")
 
-    sebi_url = get_sebi_drhp_url(company_name)
-    st.markdown(
-        f"[Open DRHP / RHP documents on SEBI]({sebi_url})  \n"
-        f"_This link searches SEBI’s ‘Public Issue Offer Documents’ for **{company_name}**._"
-    )
+    sebi_url = get_best_sebi_ipo_doc(company_name)
+    if sebi_url:
+        st.markdown(
+            f"[Open SEBI filing (RHP if available, else DRHP / Draft)]({sebi_url})"
+        )
+    else:
+        # Fallback: generic SEBI search link
+        params = {
+            "doListing": "yes",
+            "sid": "3",
+            "smid": "0",
+            "ssid": "15",
+            "search": company_name,
+        }
+        generic_url = f"{SEBI_LISTING_URL}?{urllib.parse.urlencode(params)}"
+        st.markdown(
+            f"[Search SEBI Public Issues filings for this company]({generic_url})"
+        )
 
-    st.markdown("#### 1. DRHP / RHP-Focused Analysis")
+    st.markdown("#### 1. DRHP / RHP-Centric Sections")
 
     st.markdown("**a. Risk Factors**")
     st.markdown(
-        "- Internal risks (business concentration, execution dependencies)\n"
-        "- External risks (competition, technology, demand cycles)\n"
-        "- Financial risks (leverage, liquidity, cash flow)\n"
+        "- Internal risks (business concentration, execution, dependence on key people)\n"
+        "- External risks (competition, technology shifts, demand cycles)\n"
+        "- Financial risks (leverage, liquidity, cash flow volatility)\n"
         "- Legal & regulatory risks\n"
         "- Customer / supplier concentration"
     )
@@ -336,85 +452,88 @@ def render_ai_analysis(company_name: str):
     st.markdown("**b. Objects of the Issue**")
     st.markdown(
         "- Fresh issue utilisation (capex, working capital, debt repayment)\n"
-        "- Offer for Sale (OFS) details and selling shareholders\n"
+        "- Offer for Sale (OFS) – selling shareholders and quantum\n"
         "- Post-issue capital allocation and impact on balance sheet"
     )
 
     st.markdown("**c. Business Overview (from DRHP)**")
     st.markdown(
-        "- Business model & revenue streams\n"
+        "- Business model and revenue streams\n"
         "- Key products / services and segments\n"
         "- Key customers and geographic mix\n"
-        "- Moats, differentiation, and competitive positioning"
+        "- Competitive positioning and moats"
     )
 
     st.markdown("**d. Financials (from DRHP)**")
     st.markdown(
         "- Revenue and EBITDA trend (3–5 years)\n"
-        "- Profitability metrics (margins, ROE/ROCE wherever available)\n"
-        "- Related Party Transactions (RPTs)\n"
-        "- Auditor qualifications / observations\n"
-        "- Working capital cycle and cash flow quality"
+        "- Margin profile and ROE / ROCE (if disclosed)\n"
+        "- Working capital cycle and cash conversion\n"
+        "- Related Party Transactions\n"
+        "- Auditor qualifications or emphases of matter"
     )
 
-    st.markdown("**e. Promoter & Ownership Analysis**")
+    st.markdown("**e. Promoters & Ownership**")
     st.markdown(
         "- Promoter background and track record\n"
         "- Group structure and related entities\n"
         "- Pre-IPO vs post-IPO shareholding\n"
-        "- Any pledges or encumbrances disclosed"
+        "- Any pledges / encumbrances or special rights"
     )
 
     st.markdown("**f. Key DRHP Disclosures**")
     st.markdown(
-        "- Litigation and contingent liabilities\n"
+        "- Material litigation and contingent liabilities\n"
         "- Regulatory and compliance matters\n"
-        "- Lock-in details (promoter / pre-IPO investors)\n"
-        "- Any special rights or shareholder agreements disclosed"
+        "- Lock-in details (promoters / pre-IPO investors)\n"
+        "- Any special shareholder agreements"
     )
 
     st.markdown("#### 2. Macroeconomic & Sector Context")
     st.markdown(
         "- Sector outlook and linkage to GDP growth\n"
-        "- Interest rate sensitivity (capex intensity, leverage)\n"
-        "- Inflation impact on input costs / pricing power\n"
+        "- Interest rate sensitivity\n"
+        "- Inflation impact on costs / pricing power\n"
         "- Regulatory tailwinds and headwinds\n"
-        "- Relevant global trends and external shocks"
+        "- Global trends relevant to the business"
     )
 
     st.markdown("#### 3. Peer Valuation Context")
     st.markdown(
-        "- IPO valuation multiples (P/E, EV/EBITDA, P/BV, etc.) vs listed peers\n"
+        "- IPO valuation multiples vs listed peers (P/E, EV/EBITDA, P/BV, etc.)\n"
         "- Premium / discount vs peer median\n"
         "- Growth vs valuation trade-off\n"
-        "- Any structural differences vs peer set (business mix, balance sheet, risk)"
+        "- Structural differences vs peer set (balance sheet, risk)"
     )
 
-    st.markdown("#### 4. Investment Considerations Summary")
+    st.markdown("#### 4. Investment Considerations")
     st.markdown(
         "- **Key positives:** structural strengths, quality of franchise, balance sheet, macro tailwinds\n"
         "- **Key concerns:** concentration, governance, leverage, execution risk, regulatory overhang\n"
-        "- **Post-listing watchlist:** what to track in quarterly results & disclosures\n"
-        "- **Macro timing assessment:** where this IPO sits in the broader cycle (rates, liquidity, risk appetite)"
+        "- **Post-listing watchlist:** KPIs to track in quarterly results\n"
+        "- **Macro timing assessment:** where this IPO sits in the liquidity / rate cycle"
     )
 
     st.info(
-        "In the next version, this section can be auto-populated by an AI agent that reads the DRHP/RHP, "
-        "extracts key disclosures, builds peer comps, and generates a structured memo."
+        "This is a DRHP/RHP-first analysis template. "
+        "In a full Cosalpha version, an AI agent would ingest the SEBI PDFs, "
+        "populate each section with extracted data and peer comps, and generate a final memo."
     )
 
 
-# ---------- UI ----------
+# -----------------------------
+# Streamlit UI
+# -----------------------------
 
 st.set_page_config(page_title="🇮🇳 India IPO Tracker", layout="wide")
 
-st.title("🇮🇳 India IPO Tracker (Screener.in + DRHP Lens)")
+st.title("🇮🇳 India IPO Tracker (Screener.in + SEBI DRHP/RHP)")
 st.caption(
-    "Currently ongoing, upcoming and recent IPO data scraped from Screener.in for learning/demo only. "
-    "AI analysis is designed to be DRHP/RHP-focused. Not investment advice."
+    "Currently ongoing, upcoming and recent equity IPO data from Screener.in. "
+    "SEBI links go to RHP where available, otherwise DRHP/draft. "
+    "For learning/demo only; not investment advice."
 )
 
-# Order: ongoing, upcoming, past 3 months
 tab_ongoing, tab_upcoming, tab_past = st.tabs(
     [
         "⏳ Currently Ongoing IPOs",
@@ -428,12 +547,11 @@ today = dt.date.today()
 # ---- Currently Ongoing IPOs ----
 with tab_ongoing:
     st.subheader("Currently Ongoing IPOs (Subscription window open now)")
-    df_up = fetch_upcoming_processed()
 
+    df_up = fetch_upcoming_processed()
     if df_up.empty:
         st.warning("Could not load IPO data from Screener.in.")
     else:
-        # Ongoing = start <= today <= end
         def is_ongoing(row):
             s = row["_sub_start"]
             e = row["_sub_end"]
@@ -451,23 +569,36 @@ with tab_ongoing:
         ]
         display_cols = [c for c in display_cols if c is not None]
 
-        search_o = st.text_input("Search by company name", key="search_ongoing")
-        if search_o:
+        search_text = st.text_input("Search by company name", key="ongoing_search")
+        if search_text:
             df_view = df_view[
-                df_view["Name"].str.contains(search_o, case=False, na=False)
+                df_view["Name"].str.contains(search_text, case=False, na=False)
             ]
 
-        # Index should start at 1
+        # Add SEBI link column
+        if not df_view.empty:
+            df_view["SEBI DRHP/RHP"] = df_view["Name"].apply(get_best_sebi_ipo_doc)
+
+        # Index from 1
         df_view = df_view.reset_index(drop=True)
         df_view.index = df_view.index + 1
 
-        st.dataframe(df_view[display_cols], use_container_width=True)
+        st.dataframe(
+            df_view[display_cols + (["SEBI DRHP/RHP"] if "SEBI DRHP/RHP" in df_view.columns else [])],
+            use_container_width=True,
+            column_config={
+                "SEBI DRHP/RHP": st.column_config.LinkColumn(
+                    "SEBI DRHP/RHP",
+                    help="Opens SEBI public-issues filing (RHP if available, else DRHP/draft).",
+                )
+            },
+        )
 
         if not df_view.empty:
             selected_company = st.selectbox(
-                "Click a company for DRHP-focused AI analysis",
+                "Select a company for DRHP-focused analysis",
                 options=df_view["Name"].unique(),
-                key="analysis_ongoing",
+                key="ongoing_analysis_select",
             )
             render_ai_analysis(selected_company)
 
@@ -475,12 +606,11 @@ with tab_ongoing:
 # ---- Upcoming IPOs – planned but not launched ----
 with tab_upcoming:
     st.subheader("Upcoming IPOs – Planned but not launched (Subscription not started)")
-    df_up = fetch_upcoming_processed()
 
+    df_up = fetch_upcoming_processed()
     if df_up.empty:
         st.warning("Could not load IPO data from Screener.in.")
     else:
-        # Upcoming = subscription start > today
         mask_upcoming = df_up["_sub_start"].apply(
             lambda d: isinstance(d, dt.date) and d > today
         )
@@ -495,23 +625,34 @@ with tab_upcoming:
         ]
         display_cols = [c for c in display_cols if c is not None]
 
-        search_u = st.text_input("Search by company name", key="search_upcoming")
-        if search_u:
+        search_text = st.text_input("Search by company name", key="upcoming_search")
+        if search_text:
             df_view = df_view[
-                df_view["Name"].str.contains(search_u, case=False, na=False)
+                df_view["Name"].str.contains(search_text, case=False, na=False)
             ]
 
-        # Index from 1
+        if not df_view.empty:
+            df_view["SEBI DRHP/RHP"] = df_view["Name"].apply(get_best_sebi_ipo_doc)
+
         df_view = df_view.reset_index(drop=True)
         df_view.index = df_view.index + 1
 
-        st.dataframe(df_view[display_cols], use_container_width=True)
+        st.dataframe(
+            df_view[display_cols + (["SEBI DRHP/RHP"] if "SEBI DRHP/RHP" in df_view.columns else [])],
+            use_container_width=True,
+            column_config={
+                "SEBI DRHP/RHP": st.column_config.LinkColumn(
+                    "SEBI DRHP/RHP",
+                    help="Opens SEBI public-issues filing (RHP if available, else DRHP/draft).",
+                )
+            },
+        )
 
         if not df_view.empty:
             selected_company = st.selectbox(
-                "Click a company for DRHP-focused AI analysis",
+                "Select a company for DRHP-focused analysis",
                 options=df_view["Name"].unique(),
-                key="analysis_upcoming",
+                key="upcoming_analysis_select",
             )
             render_ai_analysis(selected_company)
 
@@ -526,7 +667,6 @@ with tab_past:
     )
 
     df_past = fetch_past_last_3_months()
-
     if df_past.empty:
         st.warning(
             "No IPOs found for the last 3 months on Screener.in, "
@@ -543,31 +683,43 @@ with tab_past:
         ]
         display_cols = [c for c in display_cols if c in df_past.columns]
 
-        search_p = st.text_input("Search by company name", key="search_past")
-        if search_p:
+        search_text = st.text_input("Search by company name", key="past_search")
+        if search_text:
             df_past = df_past[
-                df_past["Name"].str.contains(search_p, case=False, na=False)
+                df_past["Name"].str.contains(search_text, case=False, na=False)
             ]
 
-        # Index from 1
+        if not df_past.empty:
+            df_past["SEBI DRHP/RHP"] = df_past["Name"].apply(get_best_sebi_ipo_doc)
+
         df_past = df_past.reset_index(drop=True)
         df_past.index = df_past.index + 1
 
-        st.dataframe(df_past[display_cols], use_container_width=True)
+        st.dataframe(
+            df_past[display_cols + (["SEBI DRHP/RHP"] if "SEBI DRHP/RHP" in df_past.columns else [])],
+            use_container_width=True,
+            column_config={
+                "SEBI DRHP/RHP": st.column_config.LinkColumn(
+                    "SEBI DRHP/RHP",
+                    help="Opens SEBI public-issues filing (RHP if available, else DRHP/draft).",
+                )
+            },
+        )
 
         if not df_past.empty:
             selected_company = st.selectbox(
-                "Click a company for DRHP-focused AI analysis",
+                "Select a company for DRHP-focused analysis",
                 options=df_past["Name"].unique(),
-                key="analysis_past",
+                key="past_analysis_select",
             )
             render_ai_analysis(selected_company)
+
 
 st.markdown(
     """
     <div style="font-size:0.8rem; color:#666; margin-top:1rem;">
-    Source: <a href="https://www.screener.in/ipo/" target="_blank">Screener.in IPO pages</a> (equity IPOs only, SME rows filtered out where marked).<br>
-    DRHP links redirect to SEBI's public 'Offer Documents' search. For personal / demo / educational use only.
+    IPO data source: <a href="https://www.screener.in/ipo/" target="_blank">Screener.in IPO pages</a> (equity IPOs only; SME labels filtered where obvious).<br>
+    DRHP/RHP links scraped via SEBI's public 'Filings & Public Issues' search. For personal / demo / educational use only. Not investment advice.
     </div>
     """,
     unsafe_allow_html=True,
