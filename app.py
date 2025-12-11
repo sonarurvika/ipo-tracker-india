@@ -139,18 +139,39 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(ttl=600)
 def fetch_upcoming_raw() -> pd.DataFrame:
     """Fetch raw upcoming IPO table from Screener.in."""
-    tables = pd.read_html(UPCOMING_URL)
-    target = None
+    try:
+        resp = requests.get(UPCOMING_URL, headers=HTTP_HEADERS, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        st.error(f"Error fetching Upcoming IPOs page from Screener.in: {e}")
+        return pd.DataFrame()
 
+    try:
+        tables = pd.read_html(resp.text)
+    except Exception as e:
+        st.error(f"Error parsing Upcoming IPOs HTML from Screener.in: {e}")
+        return pd.DataFrame()
+
+    target = None
     for df in tables:
         df = normalize_columns(df)
         cols = [str(c).strip() for c in df.columns]
-        if "Name" in cols and "Subscription Period" in cols and "Listing Date" in cols:
+
+        # Be more flexible: look for columns *containing* our keys, not exact match
+        has_name = any("name" == c.lower() or "name" in c.lower() for c in cols)
+        has_sub_period = any("subscription period" in c.lower() for c in cols)
+        has_listing = any("listing date" in c.lower() for c in cols)
+
+        if has_name and has_sub_period and has_listing:
             df.columns = cols
             target = df
             break
 
     if target is None:
+        st.sidebar.warning(
+            "Could not find Upcoming IPO table on Screener.in "
+            "(page structure may have changed)."
+        )
         return pd.DataFrame()
 
     return target
